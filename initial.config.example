@@ -1,0 +1,8 @@
+DOMAIN=lms.yourschool.sch.id
+ADMIN_USERNAME=admin
+ADMIN_EMAIL=admin@yourschool.sch.id
+ADMIN_PASSWORD=SecurePassword123
+SCHOOL_NAME=SMK Example School
+DB_PASSWORD=
+SCHOOL_LEVEL=SMA
+TIMEZONE=Asia/Jakarta
