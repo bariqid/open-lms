@@ -30,7 +30,7 @@ BOLD='\033[1m'
 # ============================================
 SCRIPT_VERSION="1.0.0"
 TARGET_USER="ubuntu"
-INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/bariqid/vajar-lms/master/deploy/install.sh"
+INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/bariqid/open-lms/refs/heads/main/install.sh"
 LOG_FILE="/var/log/lms-install-do.log"
 
 # ============================================
