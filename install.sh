@@ -518,11 +518,316 @@ create_app_structure() {
     mkdir -p "$APP_DIR/public/storages/assets/images/teachers"
     mkdir -p "$APP_DIR/public/storages/assets/images/students"
     mkdir -p "$APP_DIR/public/storages/course-thumbnails"
+    mkdir -p "$APP_DIR/public/quiz-answers"
     mkdir -p "$APP_DIR/mysql/data"
     mkdir -p "$APP_DIR/redis/data"
+    mkdir -p "$APP_DIR/docker/php"
+    mkdir -p "$APP_DIR/docker/nginx"
     mkdir -p "$BACKUP_DIR"
     
     log "✓ Application directories created"
+}
+
+create_docker_configs() {
+    log "Creating Docker configuration files for high-performance mode..."
+    
+    # Create PHP-FPM high-performance config
+    cat > "$APP_DIR/docker/php/php-fpm-pool-highperf.conf" << 'EOFPHP'
+; PHP-FPM Pool Configuration for HIGH CONCURRENCY (1000+ users)
+[www]
+pm = dynamic
+pm.max_children = 150
+pm.start_servers = 20
+pm.min_spare_servers = 10
+pm.max_spare_servers = 50
+pm.max_requests = 1000
+pm.process_idle_timeout = 10s
+request_terminate_timeout = 3600s
+request_slowlog_timeout = 30s
+clear_env = no
+user = www-data
+group = www-data
+listen = 127.0.0.1:9000
+listen.backlog = 65535
+access.log = /var/log/php-fpm-access.log
+slowlog = /var/log/php-fpm-slow.log
+php_admin_value[disable_functions] = passthru,shell_exec,system
+php_admin_flag[allow_url_fopen] = on
+php_admin_value[upload_max_filesize] = 10G
+php_admin_value[post_max_size] = 10G
+php_admin_value[max_execution_time] = 0
+php_admin_value[max_input_time] = 0
+php_admin_value[memory_limit] = 256M
+php_admin_value[opcache.enable] = 1
+php_admin_value[realpath_cache_size] = 4096K
+php_admin_value[realpath_cache_ttl] = 600
+php_admin_value[session.save_path] = /var/www/html/storage/framework/sessions
+EOFPHP
+
+    # Create Nginx high-performance main config
+    cat > "$APP_DIR/docker/nginx/nginx-highperf.conf" << 'EOFNGINX'
+worker_processes auto;
+worker_rlimit_nofile 65535;
+error_log /var/log/nginx/error.log warn;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 4096;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    '$request_time $upstream_response_time';
+    access_log /var/log/nginx/access.log main buffer=16k flush=2m;
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    keepalive_requests 1000;
+    client_body_buffer_size 128k;
+    client_header_buffer_size 4k;
+    large_client_header_buffers 4 32k;
+    client_body_timeout 3600s;
+    client_header_timeout 60s;
+    send_timeout 3600s;
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/x-javascript application/xml application/xml+rss application/vnd.ms-fontobject application/x-font-ttf font/opentype image/svg+xml;
+    open_file_cache max=10000 inactive=20s;
+    open_file_cache_valid 30s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+    limit_req_zone $binary_remote_addr zone=login:10m rate=5r/s;
+    limit_req_zone $binary_remote_addr zone=api:10m rate=30r/s;
+    limit_conn_zone $binary_remote_addr zone=addr:10m;
+    include /etc/nginx/http.d/*.conf;
+}
+EOFNGINX
+
+    # Create Nginx high-performance server config
+    cat > "$APP_DIR/docker/nginx/default-highperf.conf" << 'EOFNGINXDEF'
+server {
+    listen 80;
+    server_name localhost;
+    root /var/www/html/public;
+    index index.php index.html;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    client_max_body_size 10G;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location = /login {
+        limit_req zone=login burst=10 nodelay;
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location /api/ {
+        limit_req zone=api burst=50 nodelay;
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+        fastcgi_read_timeout 3600s;
+        fastcgi_send_timeout 3600s;
+        fastcgi_connect_timeout 60s;
+        fastcgi_buffer_size 32k;
+        fastcgi_buffers 64 16k;
+        fastcgi_busy_buffers_size 128k;
+        fastcgi_temp_file_write_size 256k;
+        fastcgi_keep_conn on;
+    }
+
+    location ~ /\. { deny all; }
+    location ~ /(\.env|\.git|composer\.(json|lock)|package\.(json|lock)|yarn\.lock) { deny all; }
+
+    location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        add_header Vary Accept-Encoding;
+        access_log off;
+        try_files $uri =404;
+    }
+
+    location /storage { try_files $uri $uri/ /index.php?$query_string; }
+    location /storages { try_files $uri $uri/ /index.php?$query_string; }
+    location = /health { access_log off; try_files $uri /health.php; }
+}
+EOFNGINXDEF
+
+    log "✓ Docker configuration files created"
+}
+
+create_docker_compose_highperf() {
+    log "Creating Docker Compose high-performance configuration..."
+    
+    cat > "$APP_DIR/docker-compose.highperf.yml" << 'EOF'
+# Docker Compose for HIGH PERFORMANCE (1000+ concurrent users)
+# Use: docker compose -f docker-compose.highperf.yml up -d
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: lms-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_DATABASE:-vajar_lms}
+      MYSQL_USER: ${DB_USERNAME:-vajar_lms}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - lms_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - --innodb-buffer-pool-size=1G
+      - --innodb-log-file-size=256M
+      - --innodb-flush-log-at-trx-commit=2
+      - --innodb-flush-method=O_DIRECT
+      - --max-connections=500
+      - --thread-cache-size=50
+      - --performance-schema=OFF
+
+  redis:
+    image: redis:7-alpine
+    container_name: lms-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - lms_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+
+  app:
+    image: ${DOCKER_IMAGE:-bariqid/vajar_lms_image:latest}
+    container_name: lms-app
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - app_storage:/var/www/html/storage
+      - app_public:/var/www/html/public/storages
+      - ./docker/php/php-fpm-pool-highperf.conf:/usr/local/etc/php-fpm.d/www.conf:ro
+      - ./docker/nginx/nginx-highperf.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/default-highperf.conf:/etc/nginx/http.d/default.conf:ro
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      - APP_DEBUG=${APP_DEBUG:-false}
+      - APP_KEY=${APP_KEY}
+      - APP_URL=${APP_URL}
+      - DB_CONNECTION=mysql
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_DATABASE=${DB_DATABASE:-vajar_lms}
+      - DB_USERNAME=${DB_USERNAME:-vajar_lms}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - CACHE_DRIVER=redis
+      - SESSION_DRIVER=redis
+      - QUEUE_CONNECTION=redis
+      - REDIS_CLIENT=predis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    networks:
+      - lms_network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  queue:
+    image: ${DOCKER_IMAGE:-bariqid/vajar_lms_image:latest}
+    container_name: lms-queue
+    restart: unless-stopped
+    command: php artisan queue:work redis --sleep=3 --tries=3 --max-jobs=1000 --max-time=3600
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      - APP_KEY=${APP_KEY}
+      - DB_HOST=mysql
+      - DB_DATABASE=${DB_DATABASE:-vajar_lms}
+      - DB_USERNAME=${DB_USERNAME:-vajar_lms}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - QUEUE_CONNECTION=redis
+    volumes:
+      - app_storage:/var/www/html/storage
+    depends_on:
+      - app
+    networks:
+      - lms_network
+
+  scheduler:
+    image: ${DOCKER_IMAGE:-bariqid/vajar_lms_image:latest}
+    container_name: lms-scheduler
+    restart: unless-stopped
+    command: sh -c "while true; do php artisan schedule:run --verbose --no-interaction & sleep 60; done"
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      - APP_KEY=${APP_KEY}
+      - DB_HOST=mysql
+      - DB_DATABASE=${DB_DATABASE:-vajar_lms}
+      - DB_USERNAME=${DB_USERNAME:-vajar_lms}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+    volumes:
+      - app_storage:/var/www/html/storage
+    depends_on:
+      - app
+    networks:
+      - lms_network
+
+volumes:
+  mysql_data:
+  redis_data:
+  app_storage:
+  app_public:
+
+networks:
+  lms_network:
+    driver: bridge
+EOF
+
+    log "✓ Docker Compose high-performance configuration created"
 }
 
 create_env_file() {
@@ -1063,6 +1368,91 @@ case "$1" in
     mysql)
         docker compose exec mysql mysql -u root -p"$(grep DB_ROOT_PASSWORD .env | cut -d '=' -f2)" vajar_lms
         ;;
+    highperf)
+        case "$2" in
+            up)
+                # Check system resources before enabling high-performance
+                MEM_TOTAL=$(free -m | awk '/^Mem:/{print $2}')
+                CPU_CORES=$(nproc)
+                
+                echo "📊 Checking system resources..."
+                echo "   CPU Cores: $CPU_CORES (recommended: 4+)"
+                echo "   RAM: ${MEM_TOTAL}MB (recommended: 8GB+)"
+                echo ""
+                
+                if [[ $MEM_TOTAL -lt 4000 ]]; then
+                    echo "❌ ERROR: Insufficient RAM for high-performance mode"
+                    echo "   Required: 4GB minimum, 8GB recommended"
+                    echo "   Available: ${MEM_TOTAL}MB"
+                    echo ""
+                    echo "High-performance mode requires more resources."
+                    echo "Consider upgrading your server or use standard mode."
+                    exit 1
+                fi
+                
+                if [[ $CPU_CORES -lt 2 ]]; then
+                    echo "❌ ERROR: Insufficient CPU cores for high-performance mode"
+                    echo "   Required: 2 minimum, 4+ recommended"
+                    echo "   Available: $CPU_CORES"
+                    exit 1
+                fi
+                
+                if [[ $MEM_TOTAL -lt 8000 ]] || [[ $CPU_CORES -lt 4 ]]; then
+                    echo "⚠️  WARNING: Your system meets minimum but not recommended specs"
+                    echo "   For optimal performance: 4+ CPU cores, 8GB+ RAM"
+                    read -p "Continue anyway? [y/N]: " confirm
+                    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                        echo "Cancelled."
+                        exit 0
+                    fi
+                fi
+                
+                echo ""
+                echo "🚀 Switching to HIGH PERFORMANCE mode..."
+                echo "Stopping current containers..."
+                docker compose down
+                echo "Starting high-performance containers..."
+                docker compose -f docker-compose.highperf.yml up -d
+                echo "Waiting for containers to be healthy..."
+                sleep 15
+                docker compose -f docker-compose.highperf.yml ps
+                echo ""
+                echo "✓ HIGH PERFORMANCE mode activated!"
+                echo "  - PHP-FPM: 150 max workers"
+                echo "  - Nginx: 4096 connections per worker"
+                echo "  - Redis: Required for sessions/cache"
+                ;;
+            down)
+                echo "📉 Switching back to STANDARD mode..."
+                echo "Stopping high-performance containers..."
+                docker compose -f docker-compose.highperf.yml down
+                echo "Starting standard containers..."
+                docker compose up -d
+                echo "Waiting for containers to be healthy..."
+                sleep 15
+                docker compose ps
+                echo ""
+                echo "✓ STANDARD mode activated!"
+                ;;
+            status)
+                if docker compose -f docker-compose.highperf.yml ps 2>/dev/null | grep -q "lms-app"; then
+                    echo "🚀 Currently running in HIGH PERFORMANCE mode"
+                    docker compose -f docker-compose.highperf.yml ps
+                else
+                    echo "📦 Currently running in STANDARD mode"
+                    docker compose ps
+                fi
+                ;;
+            *)
+                echo "Usage: lms highperf <up|down|status>"
+                echo ""
+                echo "Commands:"
+                echo "  up      - Switch to high-performance mode (1000+ users)"
+                echo "  down    - Switch back to standard mode"
+                echo "  status  - Check current mode"
+                ;;
+        esac
+        ;;
     *)
         echo "Vajar LMS Management CLI"
         echo ""
@@ -1080,6 +1470,12 @@ case "$1" in
         echo "  artisan   - Run artisan command"
         echo "  shell     - Enter app container shell"
         echo "  mysql     - Enter MySQL shell"
+        echo "  highperf  - Switch between standard/high-performance mode"
+        echo ""
+        echo "High Performance Mode:"
+        echo "  lms highperf up     - Enable high-performance (1000+ users)"
+        echo "  lms highperf down   - Switch to standard mode"
+        echo "  lms highperf status - Check current mode"
         ;;
 esac
 EOFCLI
@@ -1090,6 +1486,39 @@ EOFCLI
     (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/lms backup >> /var/log/lms-backup.log 2>&1") | crontab -
     
     log "✓ Management scripts created"
+}
+
+fix_app_ownership() {
+    log "Fixing application directory ownership..."
+    
+    # Detect the non-root user who will manage the app
+    # Priority: SUDO_USER > ubuntu > first non-root user with home dir
+    local app_user=""
+    
+    if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
+        app_user="$SUDO_USER"
+    elif id "ubuntu" &>/dev/null; then
+        app_user="ubuntu"
+    else
+        # Find first non-root user with a home directory
+        app_user=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1; exit}')
+    fi
+    
+    if [[ -n "$app_user" ]]; then
+        log_info "Setting ownership to user: $app_user"
+        
+        # Change ownership of app directory (excluding docker volumes)
+        chown -R "$app_user:$app_user" "$APP_DIR"
+        chown -R "$app_user:$app_user" "$BACKUP_DIR"
+        
+        # Keep .env secure but accessible
+        chmod 600 "$APP_DIR/.env"
+        chmod 600 "$APP_DIR/CREDENTIALS.txt" 2>/dev/null || true
+        
+        log "✓ Ownership set to '$app_user' for $APP_DIR"
+    else
+        log_warn "Could not detect non-root user, keeping root ownership"
+    fi
 }
 
 print_completion() {
@@ -1183,6 +1612,8 @@ main() {
     install_certbot
     setup_firewall
     create_app_structure
+    create_docker_configs
+    create_docker_compose_highperf
     create_env_file
     create_docker_compose
     create_nginx_config
@@ -1192,6 +1623,7 @@ main() {
     setup_ssl
     optimize_performance
     create_management_scripts
+    fix_app_ownership
     
     # Done!
     print_completion
